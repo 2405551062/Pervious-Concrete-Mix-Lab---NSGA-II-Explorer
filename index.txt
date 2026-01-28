@@ -1,0 +1,184 @@
+## 1. Core idea of the app
+
+The app is an **interactive mix-design lab** for pervious concrete.
+
+Users don’t just type numbers and get one answer. Instead, they explore trade-offs:
+
+* Higher strength vs higher permeability
+* Lower cement use vs durability
+* Cost vs environmental impact
+
+NSGA-II is perfect here because pervious concrete is a **multi-objective problem**, not a single “best” mix.
+
+---
+
+## 2. What the user experiences (front-end)
+
+Think of it like a sandbox.
+
+### User inputs (simple, guided)
+
+Sliders or input boxes:
+
+* Target compressive strength range (MPa)
+* Target permeability range (mm/s)
+* Max cement reduction (%)
+* Budget limit (optional)
+* Local material availability (checkboxes: glass powder, CHA, etc.)
+
+### What the app shows
+
+* A **Pareto front graph** (interactive)
+
+  * X-axis: compressive strength
+  * Y-axis: permeability
+  * Color: CO₂ footprint or cost
+* Clicking a point shows:
+
+  * Exact mix proportions
+  * Predicted performance
+  * Cement savings
+  * CO₂ reduction estimate
+* “What happens if I tweak this?” live feedback
+
+This makes it feel exploratory, not like a calculator.
+
+---
+
+## 3. Decision variables (what NSGA-II evolves)
+
+Each individual in the population is one concrete mix.
+
+Example genome:
+
+```
+x1 = cement fraction
+x2 = waste glass powder fraction
+x3 = coconut husk ash fraction
+x4 = aggregate size (or gradation index)
+x5 = water-to-binder ratio
+```
+
+Constraints:
+
+* x1 + x2 + x3 = 1 (binder fractions)
+* Aggregate content ≈ 75–80%
+* Water ≈ 5–7%
+* Bounds based on standards (SNI / ASTM)
+
+---
+
+## 4. Objective functions (this is the heart)
+
+At minimum, three objectives:
+
+1. **Maximize compressive strength**
+
+   * f₁(x) = predicted MPa
+2. **Maximize permeability**
+
+   * f₂(x) = predicted mm/s
+3. **Minimize environmental impact**
+
+   * f₃(x) = CO₂ equivalent or cement usage
+
+Optional fourth:
+
+* Minimize cost per m³
+
+NSGA-II handles this without collapsing everything into one score.
+
+---
+
+## 5. Computational modeling layer (how predictions work)
+
+You have two realistic options.
+
+### Option A: Empirical / regression models (simpler, ideal for MVP)
+
+Based on:
+
+* Experimental data
+* Literature coefficients
+* Your GLONUT results
+
+Example:
+
+```
+Strength = a1*(cement %) + a2*(glass %) + a3*(CHA %) 
+           - a4*(void ratio) + a5*(curing factor)
+```
+
+```
+Permeability = b1*(void ratio) + b2*(aggregate size)
+               - b3*(paste content)
+```
+
+Fast, explainable, good for education.
+
+---
+
+### Option B: ML surrogate model (advanced version)
+
+* Train a model (Random Forest / Neural Net)
+* Inputs: mix proportions
+* Outputs: strength, permeability
+
+NSGA-II evaluates the surrogate instead of real experiments.
+
+This feels very “smart lab” to users.
+
+---
+
+## 6. NSGA-II workflow inside the app
+
+1. Initialize random concrete mixes (population)
+2. Predict properties using the computational model
+3. Evaluate objectives
+4. Non-dominated sorting
+5. Crossover and mutation (respect constraints)
+6. Repeat for N generations
+7. Return Pareto-optimal mixes
+
+All this runs behind the scenes.
+
+To the user, it feels instant or near-real-time.
+
+---
+
+## 7. Suggested tech stack (realistic and student-friendly)
+
+### Backend
+
+* Python
+* `pymoo` or `deap` for NSGA-II
+* NumPy + SciPy
+* Optional: scikit-learn for surrogate models
+* FastAPI for API endpoints
+
+### Frontend
+
+* React or Vue
+* Plotly.js for interactive Pareto graphs
+* Tailwind or simple CSS
+
+### Data
+
+* JSON or SQLite for mix datasets
+* Easy to expand later
+
+---
+
+## 8. Educational layer (what makes this special)
+
+Each result is explained in plain language:
+
+* “This mix favors permeability over strength”
+* “Reducing cement beyond 45% causes rapid strength loss”
+* “This solution is non-dominated, meaning you can’t improve one goal without sacrificing another”
+
+This turns the app into:
+
+* A learning tool
+* A decision-support tool
+* A showcase of computational engineering
