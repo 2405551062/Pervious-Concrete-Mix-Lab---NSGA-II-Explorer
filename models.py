@@ -9,6 +9,26 @@ def binder_from_uv(u, v):
     return cement, glass, cha
 
 
+def _zero_small_negative(x, tol=1e-8):
+    """If x is a small negative number (>-tol and <0), return 0.0, else return x."""
+    try:
+        if x < 0 and abs(x) < tol:
+            return 0.0
+    except Exception:
+        pass
+    return x
+
+
+def _zero_small(x, tol=1e-6):
+    """If x is very close to zero (abs(x) < tol) return 0.0 else return x."""
+    try:
+        if abs(x) < tol:
+            return 0.0
+    except Exception:
+        pass
+    return x
+
+
 def predict_void_ratio(aggregate_size_mm, cement_frac, wbr, aggregate_content=0.78):
     """Simple empirical void-ratio estimator (dimensionless).
     Keeps outputs in realistic range ~0.12-0.40
@@ -100,36 +120,70 @@ def estimate_co2(cement_frac, glass_frac, cha_frac, binder_mass_per_m3=350.0):
     return float(max(0.0, co2))
 
 
-def evaluate_mix_from_vars(x):
-    """Given decision vector x = [u, v, aggregate_size_mm, wbr]
-    return dict with cement/glass/cha fractions and predicted objectives.
+def evaluate_mix_from_vars(x, aggregate_size_mm=None, glass_ratio_norm=None, cha_ratio_norm=None):
+    """Evaluate a mix given decision variables.
+
+    Supports two interfaces for backward compatibility:
+    1) x = [u, v, aggregate_size_mm, wbr] (original): keeps previous behaviour.
+    2) x = [S, wbr] with fixed parameters provided:
+         - aggregate_size_mm (required)
+         - glass_ratio_norm (required)
+         - cha_ratio_norm (required)
+
+    In mode (2) binder fractions are computed as:
+        cement_frac = 1.0 - S
+        glass_frac  = S * glass_ratio_norm
+        cha_frac    = S * cha_ratio_norm
+    ensuring cement+glass+cha = 1.0.
     """
-    u, v, aggregate_size_mm, wbr = x
-    cement, glass, cha = binder_from_uv(u, v)
+    # Mode detection
+    x = list(x)
+    if len(x) == 4 and aggregate_size_mm is None:
+        # legacy mode: x = [u, v, aggregate_size_mm, wbr]
+        u, v, aggregate_size_mm, wbr = x
+        cement, glass, cha = binder_from_uv(u, v)
+    elif len(x) == 2 and (aggregate_size_mm is not None and glass_ratio_norm is not None and cha_ratio_norm is not None):
+        S, wbr = x
+        # normalize S into [0,1]
+        S = float(min(max(S, 0.0), 1.0))
+        cement = 1.0 - S
+        glass = S * float(glass_ratio_norm)
+        cha = S * float(cha_ratio_norm)
+    else:
+        raise ValueError("evaluate_mix_from_vars: unexpected inputs. Provide either legacy x (len=4) or x=[S,wbr] with fixed params.")
+
     substitution = float(glass + cha)
+
+    # ensure aggregate_size_mm and wbr are available in both modes
+    if len(x) == 4 and 'wbr' in locals():
+        pass
+    elif len(x) == 2:
+        # wbr variable defined earlier
+        pass
+
+    # retrieve wbr (in legacy branch, it was assigned; in new mode it's x[1])
+    if len(x) == 4:
+        wbr = float(wbr)
+    else:
+        wbr = float(x[1])
 
     void = predict_void_ratio(aggregate_size_mm, cement, wbr)
 
     # Strength uses explicit substitution sensitivity internally
     strength = predict_strength(cement, glass, cha, void)
 
-    # Permeability: use substitution → permeability regression extracted from Results.csv
-    # Linear fit: k = p_intercept + p_slope * substitution_pct
+    # Permeability: same regression approach as before
     p_slope = 0.00324357
     p_intercept = 2.76825951
 
     substitution_pct = 100.0 * substitution
 
-    # Small global scale factor applied so that mid-range substitution (≈42.5%)
-    # reproduces the lab mid-target (~2.2 mm/s). This scale was computed as:
-    #   scale = target_mid / (p_intercept + p_slope * 42.5)
+    # Small global scale factor preserved
     scale = 0.7570254386518729
 
-    # Regression baseline (from data) scaled to align with lab mid-range
     k_reg = p_intercept + p_slope * substitution_pct
     k_scaled = scale * k_reg
 
-    # Geometric/void correction: larger aggregates and higher void ratio increase k
     size_factor = aggregate_size_mm / 20.0
     paste_content = 0.22
     geom_term = 3.0 * void * size_factor * (1.0 - paste_content)
@@ -137,6 +191,16 @@ def evaluate_mix_from_vars(x):
     permeability = float(k_scaled + geom_term)
 
     co2 = estimate_co2(cement, glass, cha)
+    # avoid tiny negative artefacts from floating-point ops
+    cement = float(_zero_small_negative(cement))
+    glass = float(_zero_small_negative(glass))
+    cha = float(_zero_small_negative(cha))
+    substitution = float(_zero_small_negative(substitution))
+    void = float(_zero_small_negative(void))
+    strength = float(_zero_small_negative(strength))
+    permeability = float(_zero_small_negative(permeability))
+    co2 = float(_zero_small_negative(co2))
+
     return {
         "cement_frac": cement,
         "glass_frac": glass,
@@ -149,3 +213,85 @@ def evaluate_mix_from_vars(x):
         "permeability_mms": permeability,
         "co2_kg_per_m3": co2,
     }
+
+
+def compute_cost_from_mix(mix, *,
+                          aggregate_mass_per_unit=3.0,
+                          unit_prices=None):
+    """Compute material cost breakdown per GLONUT unit using GLONUT assumptions.
+
+    Methodology (GLONUT integration):
+    - One GLONUT is the base unit (not 1 m^3). Binder mass per GLONUT = 1.0 kg.
+    - Base GLONUT masses (for reference):
+        Water: 0.2 kg
+        Cement: 0.6 kg
+        Gravel: 3.0 kg (fixed)
+        CHA: 0.2 kg
+        Glass: 0.2 kg
+    - When using optimized binder fractions (cement_frac, glass_frac, cha_frac),
+      scale cement/glass/CHA so their masses sum to the binder mass per GLONUT (1.0 kg).
+    - Water mass per GLONUT = wbr * binder_mass_per_glonut.
+    - Cost per m² = cost_per_glonut * 14.8.
+
+    Returns (rows, totals) where rows is a list of dicts with keys:
+      'Material', 'Volume (kg per GLONUT)', 'Unit price (Rp/kg)', 'Subtotal (Rp per GLONUT)'
+    """
+    if unit_prices is None:
+        unit_prices = {
+            "water": 4000.0,
+            "cement": 1500.0,
+            "gravel": 2000.0,
+            "cha": 500.0,
+            "glass": 500.0,
+        }
+
+    # mix is expected to contain keys: cement_frac, glass_frac, cha_frac, wbr
+    cement_frac = float(mix.get("cement_frac", 0.0))
+    glass_frac = float(mix.get("glass_frac", 0.0))
+    cha_frac = float(mix.get("cha_frac", 0.0))
+    wbr = float(mix.get("wbr", 0.0))
+
+    binder_mass_per_glonut = 1.0  # kg per GLONUT (by definition)
+    cement_mass = cement_frac * binder_mass_per_glonut
+    glass_mass = glass_frac * binder_mass_per_glonut
+    cha_mass = cha_frac * binder_mass_per_glonut
+    aggregate_mass = float(aggregate_mass_per_unit)  # fixed at 3.0 kg per GLONUT
+    water_mass = wbr * binder_mass_per_glonut
+
+    rows = []
+
+    # clamp tiny negative masses and very small positives
+    cement_mass = float(_zero_small(_zero_small_negative(cement_mass)))
+    glass_mass = float(_zero_small(_zero_small_negative(glass_mass)))
+    cha_mass = float(_zero_small(_zero_small_negative(cha_mass)))
+    water_mass = float(_zero_small(_zero_small_negative(water_mass)))
+
+    def add_row(name, mass, price_key, vol_label="Volume (kg per GLONUT)", sub_label="Subtotal (Rp per GLONUT)"):
+        mass = float(_zero_small(_zero_small_negative(mass)))
+        price = unit_prices.get(price_key, 0.0)
+        subtotal = mass * price
+        subtotal = float(_zero_small(_zero_small_negative(subtotal)))
+        rows.append({
+            "Material": name,
+            vol_label: round(float(mass), 4),
+            "Unit price (Rp/kg)": int(price),
+            sub_label: int(round(subtotal)),
+        })
+
+    add_row("Cement", cement_mass, "cement")
+    add_row("Crushed glass", glass_mass, "glass")
+    add_row("Coconut shell ash (CHA)", cha_mass, "cha")
+    add_row("Gravel (aggregate)", aggregate_mass, "gravel")
+    add_row("Water", water_mass, "water")
+
+    total_per_glonut = sum(r[next(k for k in r.keys() if k.startswith("Subtotal"))] for r in rows)
+
+    cost_per_m2 = total_per_glonut * 14.8
+
+    totals = {
+        "total_per_glonut": int(round(total_per_glonut)),
+        "total_per_m2": int(round(cost_per_m2)),
+        "binder_mass_per_glonut": binder_mass_per_glonut,
+    }
+
+    return rows, totals
